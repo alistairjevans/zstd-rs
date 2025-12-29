@@ -8,6 +8,11 @@ use alloc::vec::Vec;
 /// The Zstandard specification limits the maximum length of a code to 11 bits.
 pub(crate) const MAX_MAX_NUM_BITS: u8 = 11;
 
+/// Size of SIMD batch buffer for accumulating decoded symbols.
+/// 16 bytes = 128 bits = v128 SIMD width.
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+const SIMD_BATCH_SIZE: usize = 16;
+
 pub struct HuffmanDecoder<'table> {
     table: &'table HuffmanTable,
     /// State is used to index into the table.
@@ -50,6 +55,82 @@ impl<'t> HuffmanDecoder<'t> {
         // The new bits are appended at the end of the current state.
         self.state |= new_bits;
         num_bits
+    }
+
+    /// WASM SIMD optimized batch decode function.
+    /// Decodes symbols in batches and writes them using SIMD stores.
+    /// Returns the number of symbols decoded.
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    #[inline(always)]
+    pub fn decode_batch_simd(
+        &mut self,
+        br: &mut BitReaderReversed<'_>,
+        target: &mut Vec<u8>,
+        max_num_bits: u8,
+    ) -> usize {
+        use core::arch::wasm32::{v128, v128_store};
+
+        let threshold = -(max_num_bits as isize);
+        let mut total_decoded = 0;
+
+        // Decode in batches of SIMD_BATCH_SIZE symbols
+        while br.bits_remaining() > threshold + (SIMD_BATCH_SIZE as isize * max_num_bits as isize) {
+            // Ensure we have space for the batch
+            let start_len = target.len();
+            target.reserve(SIMD_BATCH_SIZE);
+
+            // Create a batch buffer on the stack
+            let mut batch = [0u8; SIMD_BATCH_SIZE];
+
+            // Decode SIMD_BATCH_SIZE symbols
+            for i in 0..SIMD_BATCH_SIZE {
+                batch[i] = self.decode_symbol();
+                self.next_state(br);
+            }
+
+            // SAFETY: We just reserved SIMD_BATCH_SIZE bytes
+            unsafe {
+                target.set_len(start_len + SIMD_BATCH_SIZE);
+                let dst = target.as_mut_ptr().add(start_len);
+
+                // Use SIMD store to write the batch
+                let batch_v128 = core::arch::wasm32::v128_load(batch.as_ptr() as *const v128);
+                v128_store(dst as *mut v128, batch_v128);
+            }
+
+            total_decoded += SIMD_BATCH_SIZE;
+        }
+
+        // Handle remaining symbols one by one
+        while br.bits_remaining() > threshold {
+            target.push(self.decode_symbol());
+            self.next_state(br);
+            total_decoded += 1;
+        }
+
+        total_decoded
+    }
+
+    /// Non-SIMD batch decode function (fallback).
+    /// Decodes all symbols from the bitstream.
+    #[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
+    #[inline(always)]
+    pub fn decode_batch_simd(
+        &mut self,
+        br: &mut BitReaderReversed<'_>,
+        target: &mut Vec<u8>,
+        max_num_bits: u8,
+    ) -> usize {
+        let threshold = -(max_num_bits as isize);
+        let mut total_decoded = 0;
+
+        while br.bits_remaining() > threshold {
+            target.push(self.decode_symbol());
+            self.next_state(br);
+            total_decoded += 1;
+        }
+
+        total_decoded
     }
 }
 

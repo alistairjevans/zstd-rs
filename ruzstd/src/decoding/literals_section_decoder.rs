@@ -110,10 +110,9 @@ fn decompress_literals(
             }
             decoder.init_state(&mut br);
 
-            while br.bits_remaining() > -(scratch.table.max_num_bits as isize) {
-                target.push(decoder.decode_symbol());
-                decoder.next_state(&mut br);
-            }
+            // Use SIMD-optimized batch decode when available
+            decoder.decode_batch_simd(&mut br, target, scratch.table.max_num_bits);
+
             if br.bits_remaining() != -(scratch.table.max_num_bits as isize) {
                 return Err(DecompressLiteralsError::BitstreamReadMismatch {
                     read_til: br.bits_remaining(),
@@ -141,10 +140,10 @@ fn decompress_literals(
             return Err(DecompressLiteralsError::ExtraPadding { skipped_bits });
         }
         decoder.init_state(&mut br);
-        while br.bits_remaining() > -(scratch.table.max_num_bits as isize) {
-            target.push(decoder.decode_symbol());
-            decoder.next_state(&mut br);
-        }
+
+        // Use SIMD-optimized batch decode when available
+        decoder.decode_batch_simd(&mut br, target, scratch.table.max_num_bits);
+
         bytes_read += source.len() as u32;
     }
 
