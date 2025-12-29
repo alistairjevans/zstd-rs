@@ -1,0 +1,16 @@
+[package]
+name = "wasm-bench"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+ruzstd = { path = "../ruzstd", default-features = false }
+wasm-bindgen = "0.2"
+
+[features]
+default = []
+simd = ["ruzstd/wasm-simd"]

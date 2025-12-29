@@ -552,6 +552,7 @@ impl Drop for RingBuffer {
 /// The chunk size is not part of the contract and may change depending on the target platform.
 ///
 /// If that isn't possible we just fall back to ptr::copy_nonoverlapping
+#[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
 #[inline(always)]
 unsafe fn copy_bytes_overshooting(
     src: (*const u8, usize),
@@ -588,6 +589,47 @@ unsafe fn copy_bytes_overshooting(
                 dst_ptr.write_unaligned(src_ptr.read_unaligned());
                 src_ptr = src_ptr.add(1);
                 dst_ptr = dst_ptr.add(1);
+            }
+        } else {
+            // Fall back to standard memcopy
+            dst.0.copy_from_nonoverlapping(src.0, copy_at_least);
+        }
+    }
+
+    debug_assert_eq!(
+        slice::from_raw_parts(src.0, copy_at_least),
+        slice::from_raw_parts(dst.0, copy_at_least)
+    );
+}
+
+/// WASM SIMD128 optimized version of copy_bytes_overshooting.
+///
+/// Uses v128 (128-bit SIMD) load/store instructions for efficient bulk memory copies.
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+#[inline(always)]
+unsafe fn copy_bytes_overshooting(
+    src: (*const u8, usize),
+    dst: (*mut u8, usize),
+    copy_at_least: usize,
+) {
+    use core::arch::wasm32::{v128, v128_load, v128_store};
+
+    const COPY_AT_ONCE_SIZE: usize = 16; // v128 = 128 bits = 16 bytes
+    let min_buffer_size = usize::min(src.1, dst.1);
+
+    // Can copy in just one read+write, very common case
+    if min_buffer_size >= COPY_AT_ONCE_SIZE && copy_at_least <= COPY_AT_ONCE_SIZE {
+        let val = v128_load(src.0 as *const v128);
+        v128_store(dst.0 as *mut v128, val);
+    } else {
+        let copy_multiple = copy_at_least.next_multiple_of(COPY_AT_ONCE_SIZE);
+        // Can copy in multiple simple instructions
+        if min_buffer_size >= copy_multiple {
+            let mut offset = 0;
+            while offset < copy_multiple {
+                let val = v128_load(src.0.add(offset) as *const v128);
+                v128_store(dst.0.add(offset) as *mut v128, val);
+                offset += COPY_AT_ONCE_SIZE;
             }
         } else {
             // Fall back to standard memcopy
